@@ -227,6 +227,127 @@ def cdl_harami(o1, c1, o2, c2):
     if c1>o1 and c2<o2 and o2<c1 and c2>o1: return -100
     return 0
 
+def cdl_breakaway(O, H, L, C):
+    """
+    脫離形態 (CDLBREAKAWAY) — 5根K棒反轉型態
+    ─────────────────────────────────────────
+    看漲脫離（下跌趨勢反轉向上）：
+      K1: 長黑K（空頭趨勢延伸）
+      K2: 向下跳空的黑K（gap down，O2 < C1）
+      K3, K4: 小實體震盪K（可紅可黑，實體 < K1實體*0.6）
+      K5: 長紅K，收盤價落在 C1 與 O2 之間
+          即：C1 < C5 < O2（收回跳空區間）
+
+    看跌脫離（上漲趨勢反轉向下）：
+      K1: 長紅K（多頭趨勢延伸）
+      K2: 向上跳空的紅K（gap up，O2 > C1）
+      K3, K4: 小實體震盪K
+      K5: 長黑K，收盤價落在 C1 與 O2 之間
+          即：O2 < C5 < C1（收回跳空區間）
+
+    回傳 100（看漲）/ -100（看跌）/ 0（無形態）
+    """
+    o1,o2,o3,o4,o5 = O
+    h1,h2,h3,h4,h5 = H
+    l1,l2,l3,l4,l5 = L
+    c1,c2,c3,c4,c5 = C
+
+    body1 = abs(c1 - o1)
+    body2 = abs(c2 - o2)
+    body3 = abs(c3 - o3)
+    body4 = abs(c4 - o4)
+    body5 = abs(c5 - o5)
+
+    if body1 == 0:
+        return 0
+
+    small_body_thresh = body1 * 0.6   # K3, K4 must be noticeably smaller
+
+    # ── 看漲脫離 ──
+    # K1: long bearish
+    k1_bear  = c1 < o1 and body1 > 0
+    # K2: gap-down bearish (open below K1 close)
+    k2_gap_d = o2 < c1 and c2 < o2
+    # K3, K4: small bodies (震盪)
+    k3_small = body3 < small_body_thresh
+    k4_small = body4 < small_body_thresh
+    # K5: long bullish, close between C1 and O2 (fills into gap)
+    k5_bull  = c5 > o5 and body5 >= body1 * 0.7 and c1 < c5 < o2
+
+    if k1_bear and k2_gap_d and k3_small and k4_small and k5_bull:
+        return 100
+
+    # ── 看跌脫離 ──
+    # K1: long bullish
+    k1_bull  = c1 > o1 and body1 > 0
+    # K2: gap-up bullish (open above K1 close)
+    k2_gap_u = o2 > c1 and c2 > o2
+    # K3, K4: small bodies
+    k3_small2 = body3 < small_body_thresh
+    k4_small2 = body4 < small_body_thresh
+    # K5: long bearish, close between O2 and C1 (fills into gap)
+    k5_bear  = c5 < o5 and body5 >= body1 * 0.7 and o2 < c5 < c1
+
+    if k1_bull and k2_gap_u and k3_small2 and k4_small2 and k5_bear:
+        return -100
+
+    return 0
+
+def cdl_ladder_bottom(O, H, L, C):
+    """
+    梯底形態 (CDLLADDERBOTTOM) — 5根K棒底部反轉
+    ──────────────────────────────────────────────
+    K1~K3: 連續三根黑K（綠K）
+      - 每根開盤價低於前一根開盤價（逐步下降）
+      - 每根收盤價低於前一根收盤價（持續下跌）
+    K4: 倒錘頭形態
+      - 黑K或小實體
+      - 上影線長（≥ 實體 × 2）
+      - 下影線短（≤ 實體 × 0.2 × 全幅）
+    K5: 強勢紅K（多頭確認）
+      - 開盤價高於 K4 開盤價
+      - 收盤價高於前四根 K 棒的最高價
+    回傳 100（看漲反轉）/ 0（無形態）
+    """
+    o1,o2,o3,o4,o5 = O
+    h1,h2,h3,h4,h5 = H
+    l1,l2,l3,l4,l5 = L
+    c1,c2,c3,c4,c5 = C
+
+    # K1~K3：三根黑K，開盤與收盤逐步走低
+    three_bear = (
+        c1 < o1 and c2 < o2 and c3 < o3 and   # 都是黑K
+        o2 < o1 and o3 < o2 and                 # 開盤逐步低
+        c2 < c1 and c3 < c2                     # 收盤逐步低
+    )
+    if not three_bear:
+        return 0
+
+    # K4：倒錘頭（上影線長、下影線短、小實體）
+    body4        = abs(c4 - o4)
+    rng4         = h4 - l4
+    upper4       = h4 - max(o4, c4)
+    lower4       = min(o4, c4) - l4
+    inv_hammer4  = (
+        rng4 > 0 and
+        upper4 >= max(body4, rng4 * 0.4) and    # 上影線要夠長
+        lower4 <= rng4 * 0.25                    # 下影線要短
+    )
+    if not inv_hammer4:
+        return 0
+
+    # K5：紅K，開盤 > K4 開盤，收盤 > 前四根最高
+    prev4_high = max(h1, h2, h3, h4)
+    k5_confirm = (
+        c5 > o5 and          # 紅K
+        o5 > o4 and          # 開盤高於K4開盤
+        c5 > prev4_high      # 收盤突破前四根最高
+    )
+    if not k5_confirm:
+        return 0
+
+    return 100
+
 def add_cdl_patterns(df: pd.DataFrame) -> pd.DataFrame:
     n = len(df)
     O = df['Open'].values.astype(float)
@@ -237,7 +358,8 @@ def add_cdl_patterns(df: pd.DataFrame) -> pd.DataFrame:
     p = {k: np.zeros(n) for k in [
         'CDL_HAMMER','CDL_SHOOTINGSTAR','CDL_DOJI',
         'CDL_ENGULFING','CDL_MORNINGSTAR','CDL_EVENINGSTAR',
-        'CDL_3WHITESOLDIERS','CDL_3BLACKCROWS','CDL_HARAMI'
+        'CDL_3WHITESOLDIERS','CDL_3BLACKCROWS','CDL_HARAMI',
+        'CDL_BREAKAWAY','CDL_LADDERBOTTOM',
     ]}
 
     for i in range(n):
@@ -252,6 +374,13 @@ def add_cdl_patterns(df: pd.DataFrame) -> pd.DataFrame:
             p['CDL_EVENINGSTAR'][i]    = cdl_evening_star(O[i-2],C[i-2],O[i-1],H[i-1],L[i-1],C[i-1],O[i],C[i])
             p['CDL_3WHITESOLDIERS'][i] = cdl_3white_soldiers(O[i-2:i+1],C[i-2:i+1])
             p['CDL_3BLACKCROWS'][i]    = cdl_3black_crows(O[i-2:i+1],C[i-2:i+1])
+        if i >= 4:
+            p['CDL_BREAKAWAY'][i] = cdl_breakaway(
+                O[i-4:i+1], H[i-4:i+1], L[i-4:i+1], C[i-4:i+1]
+            )
+            p['CDL_LADDERBOTTOM'][i] = cdl_ladder_bottom(
+                O[i-4:i+1], H[i-4:i+1], L[i-4:i+1], C[i-4:i+1]
+            )
 
     for k, v in p.items():
         df[k] = v
@@ -362,15 +491,17 @@ def generate_signals(df: pd.DataFrame) -> dict:
 
     # CDL Patterns
     cdl_map = {
-        'CDL_HAMMER':         ('錘頭',   True),
-        'CDL_SHOOTINGSTAR':   ('流星線', False),
-        'CDL_DOJI':           ('十字星', None),
-        'CDL_ENGULFING':      ('吞噬',   None),
-        'CDL_MORNINGSTAR':    ('晨星',   True),
-        'CDL_EVENINGSTAR':    ('昏星',   False),
-        'CDL_3WHITESOLDIERS': ('三白兵', True),
-        'CDL_3BLACKCROWS':    ('三烏鴉', False),
-        'CDL_HARAMI':         ('孕線',   None),
+        'CDL_HAMMER':         ('錘頭',      True),
+        'CDL_SHOOTINGSTAR':   ('流星線',    False),
+        'CDL_DOJI':           ('十字星',    None),
+        'CDL_ENGULFING':      ('吞噬',      None),
+        'CDL_MORNINGSTAR':    ('晨星',      True),
+        'CDL_EVENINGSTAR':    ('昏星',      False),
+        'CDL_3WHITESOLDIERS': ('三白兵',    True),
+        'CDL_3BLACKCROWS':    ('三烏鴉',    False),
+        'CDL_HARAMI':         ('孕線',      None),
+        'CDL_BREAKAWAY':      ('脫離形態',  None),   # +100 看漲 / -100 看跌
+        'CDL_LADDERBOTTOM':   ('梯底',      True),   # 只有看漲反轉
     }
     cdl_parts = []
     for col, (name, bullish) in cdl_map.items():
