@@ -6,8 +6,27 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 from datetime import datetime
+import time
 import warnings
 warnings.filterwarnings('ignore')
+
+# ══════════════════════════════════════════════════════
+# SESSION STATE DEFAULTS
+# ══════════════════════════════════════════════════════
+def init_state():
+    defaults = {
+        'log':              [],
+        'auto_scanning':    False,
+        'scan_interval_s':  300,        # seconds
+        'last_scan_time':   0.0,        # epoch
+        'scan_results':     [],
+        'next_scan_in':     0,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
 
 # ══════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -468,6 +487,54 @@ def plot_chart(df: pd.DataFrame, ticker: str) -> go.Figure:
     return fig
 
 # ══════════════════════════════════════════════════════
+# SHARED BATCH SCAN FUNCTION
+# ══════════════════════════════════════════════════════
+def run_batch_scan(watchlist, period, interval, sig_filter, show_progress=True):
+    """Scan all tickers, push Telegram, store results in session_state."""
+    results = []
+    tg_sent = 0
+    prog    = st.progress(0, text="掃描中…") if show_progress else None
+
+    for idx, ticker in enumerate(watchlist):
+        if prog:
+            prog.progress((idx + 1) / len(watchlist), text=f"分析 {ticker}…")
+        df_t = fetch_data(ticker, period, interval)
+        if df_t.empty or len(df_t) < 30:
+            continue
+        df_t = compute_indicators(df_t)
+        sgs  = generate_signals(df_t)
+        if not sgs:
+            continue
+        r = df_t.iloc[-1]
+        p = df_t.iloc[-2]['Close'] if len(df_t) > 1 else r['Close']
+        results.append({
+            '代號':       ticker,
+            '收盤價':     round(r['Close'], 2),
+            '漲跌%':      round((r['Close'] - p) / p * 100, 2),
+            '訊號':       sgs['_overall'],
+            '評分':       sgs['_score'],
+            'RSI':        round(float(r.get('RSI14', 0)), 1),
+            'MACD':       sgs.get('MACD', ''),
+            'EMA':        sgs.get('EMA', ''),
+            'SuperTrend': sgs.get('SuperTrend', ''),
+            'K線形態':    sgs.get('K線形態', ''),
+            '停損':       sgs['_stop_loss'],
+            '目標':       sgs['_take_profit'],
+        })
+        if sgs['_overall'] in sig_filter:
+            try:    nm = yf.Ticker(ticker).info.get('shortName', ticker)
+            except: nm = ticker
+            if send_telegram(build_msg(ticker, sgs, nm)):
+                tg_sent += 1
+
+    if prog:
+        prog.empty()
+
+    st.session_state.scan_results   = results
+    st.session_state.last_scan_time = time.time()
+    return results, tg_sent
+
+# ══════════════════════════════════════════════════════
 # APP LAYOUT
 # ══════════════════════════════════════════════════════
 st.title("📈 智能股市監控系統")
@@ -492,11 +559,52 @@ with st.sidebar:
 
     st.divider()
     sig_filter = st.multiselect("自動推播訊號", ["BUY","SELL","HOLD"], default=["BUY","SELL"])
-    scan_btn = st.button("🔍 掃描全部清單", use_container_width=True, type="primary")
-    test_btn = st.button("📤 發送測試訊息",  use_container_width=True)
+
+    # ── Manual scan ──
+    scan_btn = st.button("🔍 立即掃描全部清單", use_container_width=True, type="primary")
+    test_btn = st.button("📤 發送測試訊息", use_container_width=True)
     if test_btn:
         ok = send_telegram("📊 <b>智能股市監控系統</b>\n✅ Telegram 連線測試成功！")
         st.success("✅ 已送出！") if ok else st.error("❌ 請確認 Token / Chat ID")
+
+    st.divider()
+
+    # ── Auto-scan controls ──
+    st.subheader("⏱ 自動掃描排程")
+
+    interval_options = {"1 分鐘": 60, "5 分鐘": 300, "15 分鐘": 900, "30 分鐘": 1800}
+    chosen_label = st.radio(
+        "掃描間隔",
+        list(interval_options.keys()),
+        index=1,
+        horizontal=True,
+    )
+    st.session_state.scan_interval_s = interval_options[chosen_label]
+
+    col_on, col_off = st.columns(2)
+    with col_on:
+        if st.button("▶ 啟動", use_container_width=True,
+                     disabled=st.session_state.auto_scanning):
+            st.session_state.auto_scanning  = True
+            st.session_state.last_scan_time = 0.0
+            st.rerun()
+    with col_off:
+        if st.button("⏹ 停止", use_container_width=True,
+                     disabled=not st.session_state.auto_scanning):
+            st.session_state.auto_scanning = False
+            st.rerun()
+
+    # ── Status badge ──
+    if st.session_state.auto_scanning:
+        elapsed   = time.time() - st.session_state.last_scan_time
+        remaining = max(0, int(st.session_state.scan_interval_s - elapsed))
+        m, s      = divmod(remaining, 60)
+        last_ts   = (datetime.fromtimestamp(st.session_state.last_scan_time).strftime("%H:%M:%S")
+                     if st.session_state.last_scan_time > 0 else "—")
+        st.success(f"🟢 自動掃描中 | 下次：{m:02d}:{s:02d}")
+        st.caption(f"上次掃描：{last_ts} | 間隔：{chosen_label}")
+    else:
+        st.info("⏸ 自動掃描未啟動")
 
 tab1, tab2, tab3 = st.tabs(["📊 技術分析","🔍 批量掃描","📋 訊號記錄"])
 
@@ -578,45 +686,47 @@ with tab1:
 # ══ TAB 2 ══
 with tab2:
     st.subheader("🔍 批量掃描")
-    if scan_btn or st.button("▶ 開始掃描", use_container_width=True):
-        results = []; prog = st.progress(0); tg_sent = 0
-        for idx, ticker in enumerate(watchlist):
-            prog.progress((idx+1)/len(watchlist), text=f"分析 {ticker}…")
-            df_t = fetch_data(ticker, period, interval)
-            if df_t.empty or len(df_t)<30: continue
-            df_t = compute_indicators(df_t)
-            sgs  = generate_signals(df_t)
-            if not sgs: continue
-            r = df_t.iloc[-1]; p = df_t.iloc[-2]['Close'] if len(df_t)>1 else r['Close']
-            results.append({
-                '代號': ticker, '收盤價': round(r['Close'],2),
-                '漲跌%': round((r['Close']-p)/p*100,2),
-                '訊號': sgs['_overall'], '評分': sgs['_score'],
-                'RSI': round(float(r.get('RSI14',0)),1),
-                'MACD': sgs.get('MACD',''), 'EMA': sgs.get('EMA',''),
-                'SuperTrend': sgs.get('SuperTrend',''), 'K線形態': sgs.get('K線形態',''),
-                '停損': sgs['_stop_loss'], '目標': sgs['_take_profit'],
-            })
-            if sgs['_overall'] in sig_filter:
-                try:    nm = yf.Ticker(ticker).info.get('shortName', ticker)
-                except: nm = ticker
-                if send_telegram(build_msg(ticker, sgs, nm)): tg_sent += 1
-        prog.empty()
-        if results:
-            df_r = pd.DataFrame(results).sort_values('評分', ascending=False)
-            def csig(v):
-                return {'BUY':'background-color:#00c85133;color:#00c851',
-                        'SELL':'background-color:#ff444433;color:#ff4444',
-                        'HOLD':'background-color:#ffbb3333;color:#ffbb33'}.get(v,'')
-            st.dataframe(df_r.style.applymap(csig, subset=['訊號']),
-                         use_container_width=True, hide_index=True)
-            if tg_sent: st.success(f"✅ 已推播 {tg_sent} 個訊號")
-            c1,c2,c3 = st.columns(3)
-            c1.metric("🟢 買入", sum(1 for r in results if r['訊號']=='BUY'))
-            c2.metric("🔴 賣出", sum(1 for r in results if r['訊號']=='SELL'))
-            c3.metric("🟡 觀望", sum(1 for r in results if r['訊號']=='HOLD'))
-        else:
-            st.warning("未能取得任何資料。")
+
+    # Auto-scan status banner inside tab
+    if st.session_state.auto_scanning:
+        elapsed   = time.time() - st.session_state.last_scan_time
+        remaining = max(0, int(st.session_state.scan_interval_s - elapsed))
+        m2, s2    = divmod(remaining, 60)
+        last_ts2  = (datetime.fromtimestamp(st.session_state.last_scan_time).strftime("%Y-%m-%d %H:%M:%S")
+                     if st.session_state.last_scan_time > 0 else "尚未掃描")
+        st.info(f"🟢 自動掃描已啟動 | 下次掃描倒數：**{m2:02d}:{s2:02d}** | 上次：{last_ts2}")
+
+    trigger_scan = scan_btn or st.button("▶ 立即掃描", use_container_width=True)
+
+    if trigger_scan:
+        results, tg_sent = run_batch_scan(watchlist, period, interval, sig_filter, show_progress=True)
+        if tg_sent:
+            st.success(f"✅ 已推播 {tg_sent} 個訊號到 Telegram")
+
+    # Display cached results (from manual or auto scan)
+    results = st.session_state.get('scan_results', [])
+    if results:
+        last_ts_disp = (datetime.fromtimestamp(st.session_state.last_scan_time).strftime("%H:%M:%S")
+                        if st.session_state.last_scan_time > 0 else "")
+        if last_ts_disp:
+            st.caption(f"📋 掃描結果（{last_ts_disp}）— 共 {len(results)} 檔")
+
+        df_r = pd.DataFrame(results).sort_values('評分', ascending=False)
+
+        def csig(v):
+            return {'BUY':  'background-color:#00c85133;color:#00c851',
+                    'SELL': 'background-color:#ff444433;color:#ff4444',
+                    'HOLD': 'background-color:#ffbb3333;color:#ffbb33'}.get(v, '')
+
+        st.dataframe(df_r.drop(columns=[], errors='ignore').style.applymap(csig, subset=['訊號']),
+                     use_container_width=True, hide_index=True)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🟢 買入", sum(1 for r in results if r['訊號'] == 'BUY'))
+        c2.metric("🔴 賣出", sum(1 for r in results if r['訊號'] == 'SELL'))
+        c3.metric("🟡 觀望", sum(1 for r in results if r['訊號'] == 'HOLD'))
+    elif not trigger_scan:
+        st.info("點擊「立即掃描」或在側邊欄啟動自動掃描排程。")
 
 # ══ TAB 3 ══
 with tab3:
@@ -640,3 +750,21 @@ with tab3:
         if st.button("🗑 清除記錄"): st.session_state.log=[]; st.rerun()
     else:
         st.info("尚無記錄。切換到「技術分析」標籤即可自動記錄。")
+
+# ══════════════════════════════════════════════════════
+# AUTO-SCAN LOOP  — must be LAST (blocks then reruns)
+# ══════════════════════════════════════════════════════
+if st.session_state.auto_scanning:
+    elapsed   = time.time() - st.session_state.last_scan_time
+    remaining = max(0, st.session_state.scan_interval_s - elapsed)
+
+    if remaining <= 0:
+        # Time to scan — do it silently (no spinner blocks UI on rerun)
+        run_batch_scan(watchlist, period, interval, sig_filter, show_progress=False)
+        st.cache_data.clear()
+        st.rerun()
+    else:
+        # Sleep in small chunks so the countdown updates every 5 s
+        sleep_s = min(5, remaining)
+        time.sleep(sleep_s)
+        st.rerun()
