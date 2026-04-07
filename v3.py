@@ -850,7 +850,7 @@ with tab2:
                     'HOLD': 'background-color:#ffbb3333;color:#ffbb33'}.get(v, '')
 
         #st.dataframe(df_r.drop(columns=[], errors='ignore').style.applymap(csig, subset=['訊號']),
-         st.dataframe(df_r.drop(columns=[], errors='ignore').style.map(csig, subset=['訊號']),
+        st.dataframe(df_r.drop(columns=[], errors='ignore').style.map(csig, subset=['訊號']),
                      use_container_width=True, hide_index=True)
 
         c1, c2, c3 = st.columns(3)
